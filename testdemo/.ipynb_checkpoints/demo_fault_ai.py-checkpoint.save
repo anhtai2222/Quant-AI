@@ -1,0 +1,268 @@
+import nimport matplotlib.pyplot as pltimport gymnasium as gym
+import ensorflow as tf
+from tensorflow.keras import layers, Model
+# =========================
+# 1) Fault injection wrappe
+# ========================
+class FaultyCartPrapper):
+    """
+    fault_type
+      - None: normal
+      - "sensr_bias": bias on theta (angle)
+      - "seor_noise": gaussian noise on all obs
+   tuator_weak": occasionally flips action
+   """
+   def __init__(self, env, fault_type=None, severity=0.0):
+        super().__init__(env)
+       self.fault_type = fault_type
+        self.severity = float(severity)
+    def step(self, 
+        obs, rewar, terminated, truncated, info = self.env.step(action)
+
+        if self.fult_type == "sensor_bias":
+            # bias on theta
+            bias= np.array([0.0, 0.0, self.severity * 0.15, 0.0], dtype=np.float32)
+            obs = obs
+        elif self.falt_type == "sensor_noise":
+            obs = obs + np.random.randn(*obs.shape).astype(np.float32) * (self.severity * 0.05)
+        elif self.fault_type == "actuator_weak"
+            # simulate wrong actuation bability proportional to severity
+            if np.random.rand() < selfseverity:
+                action = 1 - action
+                obs, reward, terminatd, truncated, info = self.env.step(action)
+
+        return obs, reward, terminated, truncate
+# =========================
+# 2) Data collectio
+# =========================
+def collect_rollout(env, n_steps=20000, policy="random"):
+    obs, _ = env.rset()
+    seq = []
+    for _ (n_steps):
+        i policy == "random":
+            action = env.action_space.sample()
+        lse:
+            # simple heuristic controller
+    # action depends on theta and theta_dot (classic trick)            x, xdot, theta, thetadot = obs
+            action = 0 if (theta + 0.5 * thetadot) < 0 else 1
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        seq.append(np.concatenate([obs, [action]]).asfloat32))  # d=5 (obs4 + action)
+        obs = next_ob
+        if terminated or truncated:
+            obs, _ =env.reset()
+    return np.array(seq, dtype=np.float32)  # (n_steps, 5)
+def make_windows(seq, win
+    X = [
+    for i in range(len(seq) - window):
+        .append(seq[i:i+window])
+    return np.array(X, dtype=np.float32)  # (N, win
+# =========================
+# 3) LSTM Autoencoder
+# ========================
+def build_lstm_ae(T, D, latent=16):
+    inp = layers.Input(shpe=(T, D))
+    x = layeturn_sequences=True)(inp)
+    x = laers.LSTM(32, return_sequences=False)(x)
+    z = lyers.Dense(latent, activation="relu")(x)
+
+    x = layers.RepeatVector(T)(z)
+    x = ayers.LSTM(32, return_sequences=True)(x)
+    x = layers.LSTM(64, return_sequences=True)(x)= layers.TimeDistributed(layers.Dense(D))(x)
+    ae = Model(inp, out)
+    ae.compile(optimizer="adam", loss="mse"
+    return ae
+def acore(ae, X):
+    _hat = ae.predict(X, verbose=0)
+    err = np.mean((X - X_hat) ** 2, axis=(1, 2))  # scalar per window
+   return err
+
+
+# ========================
+#4) Demo: time-series with fault injected mi    + rule-based strategist (FAST/SAFE)
+# ========================
+def run_episode_with_injeted_fault(ae, fault_type="sensor_bias", fault_start_step=250,
+                                   window=50, threshold=None, show_log=False):
+    "Collect online windows
+    - Compute anomaly score each step after window filled
+     Rule-based strategist:
+        if score > threshold -> SAFE mode
+       else FAST mode
+    SAFE mode: action smoothing (limit rapid action flips)
+    env_normal = FaultyCartPole(gym.make("CartPole-v1"), fault_type=None, severity=0.0)
+    env_faulty = FaultyCartPole(gym.make("CartPole-v1"), fault_type=fault_type, severity=1.0)
+
+   obs, _ = env_normal.reset()
+    buf = []
+    scores = []
+   mode    rewards = []
+    acions = []
+
+    lst_action = 0
+    flip_cooldown = 0
+    total_rewa0
+    max_steps= 500
+
+    for stepin range(max_steps):
+        # switch env after fault_start_step
+        curenv = env_faulty if step >= fault_start_step else env_
+        # FAST: heuristic controlle
+        x, xdot, theta, thetadot = obs
+        fast_action = 0 if (theta + 0.5 * thetadot) < 0 else 1
+        # build window input for anomaly detection
+        buf.append(np.concatenate([obs, [fast_action]]).astyp(np.float32))
+        if len(buf) >
+            buf.pop()
+
+        # default mode
+        mode = "FAS"
+        score
+        # compute anomaly after buffer filled
+        if ln(buf) == window:
+            Xw = np.array([buf], dtype=np.float32)
+           score = float(anomaly_score(ae, X
+            if threshold is not None and score > threshold:
+                mode = "SAFE
+
+        # SAFE mode = smoot action changes
+        action = fast_action
+        if 
+            # only allow flipping action every few steps
+            if flip_cooldown > 0:
+                action = last_action
+                flip_cooldown -= 1
+            else:
+                # if wants to change, start cooldown
+                if action != last_action:
+                    flip_cooldown = 3  # tune: higher = smoother
+                last_action = action
+        else:
+            last_action = action
+            flip_cooldown = 0
+
+        # step
+        next_obs, reward, terminated, truncated, _ = cur_env.step(action)
+
+        total_reward += reward
+        obs = next_obs
+
+        # log
+        rewards.append(reward)
+        actions.append(action)
+        scores.append(score if score is not None else np.nan)
+        modes.append(mode)
+
+        if show_log and score is not None and step % 50 == 0:
+            print(f"step={step} score={score:.6f} mode={mode}")
+
+        if terminated or truncated:
+            break
+
+    return {
+        "scores": np.array(scores, dtype=np.float32),
+        "modes": np.array(modes),
+        "rewards": np.array(rewards, dtype=np.float32),
+        "actions": np.array(actions, dtype=np.int32),
+        "total_reward": total_reward,
+        "fault_start_step": fault_start_step
+    }
+
+
+def main():
+    np.random.seed(0)
+    tf.random.set_seed(0)
+
+    # -------------------------
+    # A) Collect NORMAL data
+    # -------------------------
+    base = gym.make("CartPole-v1")
+    normal_env = FaultyCartPole(base, fault_type=None, severity=0.0)
+
+    print("[1] Collecting normal data...")
+    normal_seq = collect_rollout(normal_env, n_steps=25000, policy="heuristic")
+    window = 50
+    X_train = make_windows(normal_seq, window=window)
+    print("X_train:", X_train.shape)  # (N, 50, 5)
+
+    # -------------------------
+    # B) Train LSTM Autoencoder
+    # -------------------------
+    T, D = X_train.shape[1], X_train.shape[2]
+    ae = build_lstm_ae(T, D, latent=16)
+
+    print("[2] Training LSTM Autoencoder...")
+    ae.fit(X_train, X_train, epochs=5, batch_size=128, validation_split=0.1, verbose=1)
+
+    # -------------------------
+    # C) Create FAULT data & compare anomaly scores (Histogram)
+    # -------------------------
+    print("[3] Scoring normal vs fault...")
+    fault_env = FaultyCartPole(gym.make("CartPole-v1"), fault_type="sensor_bias", severity=1.0)
+    fault_seq = collect_rollout(fault_env, n_steps=12000, policy="heuristic")
+    X_fault = make_windows(fault_seq, window=window)
+
+    score_normal = anomaly_score(ae, X_train[:3000])
+    score_fault = anomaly_score(ae, X_fault[:3000])
+
+    # threshold = percentile on normal distribution (simple, explainable)
+    threshold = float(np.percentile(score_normal, 95))
+    print(f"Anomaly threshold (95th percentile of normal): {threshold:.6f}")
+    print(f"Mean normal score: {score_normal.mean():.6f}")
+    print(f"Mean fault  score: {score_fault.mean():.6f}")
+
+    plt.figure()
+    plt.hist(score_normal, bins=50, alpha=0.7, label="Normal")
+    plt.hist(score_fault, bins=50, alpha=0.7, label="Fault (sensor_bias)")
+    plt.axvline(threshold, linestyle="--", label="Threshold (P95)")
+    plt.title("Histogram: Anomaly Score (Reconstruction Error)")
+    plt.xlabel("Score")
+    plt.ylabel("Count")
+    plt.legend()
+
+    # -------------------------
+    # D) Online demo: inject fault mid-episode + strategist rule
+    # -------------------------
+    print("[4] Running online episode with injected fault + rule-based strategist...")
+    result = run_episode_with_injected_fault(
+        ae,
+        fault_type="sensor_bias",
+        fault_start_step=250,
+        window=window,
+        threshold=threshold,
+        show_log=False
+    )
+
+    scores = result["scores"]
+    modes = result["modes"]
+    fault_start = result["fault_start_step"]
+    total_reward = result["total_reward"]
+    print(f"Episode total reward (with strategist): {total_reward:.0f}")
+
+    # Plot anomaly score over time
+    plt.figure()
+    plt.plot(scores, label="Anomaly score")
+    plt.axvline(fault_start, linestyle="--", label="Fault injected")
+    plt.axhline(threshold, linestyle="--", label="Threshold")
+    # highlight SAFE regions
+    safe_idx = np.where(modes == "SAFE")[0]
+    if len(safe_idx) > 0:
+        plt.scatter(safe_idx, scores[safe_idx], s=10, label="SAFE mode points")
+    plt.title("Online Detection: Score over Time (Fault Injected Mid-run)")
+    plt.xlabel("Step")
+    plt.ylabel("Anomaly score")
+    plt.legend()
+
+    # Plot mode timeline (FAST/SAFE)
+    plt.figure()
+    mode_numeric = np.array([0 if m == "FAST" else 1 for m in modes])
+    plt.step(np.arange(len(mode_numeric)), mode_numeric, where="post")
+    plt.axvline(fault_start, linestyle="--", label="Fault injected")
+    plt.yticks([0, 1], ["FAST", "SAFE"])
+    plt.title("Strategist Mode Switching (Rule-based)")
+    plt.xlabel("Step")
+    plt.ylabel("Mode")
+    plt.legend()
+
+    plt.show()
+
+if __name__ == "__main__":
+    main()
